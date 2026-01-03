@@ -6,11 +6,12 @@ import os
 from flask import Flask
 from threading import Thread
 from datetime import datetime
+import asyncio
 
-# --- RENDER KEEP-ALIVE ---
+# --- RENDER WEB SERVER (Keep-Alive) ---
 app = Flask('')
 @app.route('/')
-def home(): return "Carbon Studios Status Bot: ACTIVE"
+def home(): return "Carbon Studios Live Board: ACTIVE"
 def run(): app.run(host='0.0.0.0', port=8080)
 def keep_alive(): Thread(target=run).start()
 
@@ -23,92 +24,91 @@ LOGO_URL = "https://cdn.discordapp.com/icons/1193808450367537213/a_7914e9f733198
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def scrape_full_data():
-    """Scrapes every executor, their status, and their Discord invite from weao.xyz"""
+def scrape_weao_data():
+    """Scrapes ALL executors, statuses, and links from weao.xyz"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get("https://weao.xyz/", headers=headers, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        executor_data = []
+        executor_list = []
+        # Target table rows on weao.xyz
+        rows = soup.find_all('tr')
         
-        # weao.xyz typically uses 'card' or 'row' structures for each executor
-        # We find all containers that hold executor information
-        containers = soup.find_all(['div', 'tr'], class_=['card', 'executor', 'item']) 
+        for row in rows:
+            cells = row.find_all('td')
+            if len(cells) >= 2:
+                # Get Name and Status text
+                name = cells[0].get_text(strip=True)
+                status_text = cells[1].get_text(strip=True)
+                
+                # Assign Emojis
+                if "Working" in status_text or "✅" in status_text:
+                    status = "✅ Working"
+                elif "Patched" in status_text or "❌" in status_text:
+                    status = "❌ Patched"
+                elif "Detectable" in status_text or "🔶" in status_text:
+                    status = "🔶 Detectable"
+                else:
+                    status = f"❓ {status_text}"
+                
+                # Find the specific Discord link for this row
+                link_tag = row.find('a', href=True)
+                d_link = f"[Join Discord]({link_tag['href']})" if link_tag and "discord" in link_tag['href'] else "No Link"
+                
+                executor_list.append({"name": name, "status": status, "link": d_link})
         
-        for item in containers:
-            text_content = item.get_text(separator=" ").strip()
-            if not text_content: continue
-            
-            # Extract Name (usually the first strong or header tag)
-            name_tag = item.find(['h3', 'h4', 'strong', 'b'])
-            name = name_tag.get_text(strip=True) if name_tag else text_content.split()[0]
-            
-            # Determine Status Emoji
-            if "Working" in text_content or "✅" in text_content:
-                status = "✅ Working"
-            elif "Patched" in text_content or "❌" in text_content:
-                status = "❌ Patched"
-            elif "Detectable" in text_content or "🔶" in text_content:
-                status = "🔶 Detectable"
-            else:
-                status = "❓ Unknown"
-            
-            # Extract Discord Link for this specific executor
-            discord_url = "No Link"
-            links = item.find_all('a', href=True)
-            for link in links:
-                href = link['href']
-                if "discord.gg" in href or "discord.com/invite" in href:
-                    discord_url = f"[Join]({href})"
-                    break
-            
-            executor_data.append({"name": name, "status": status, "link": discord_url})
-            
-        return executor_data
+        return executor_list
     except Exception as e:
         print(f"Scrape Error: {e}")
         return None
 
 @tasks.loop(minutes=10)
-async def update_status_board():
+async def refresh_status_board():
     channel = bot.get_channel(CHANNEL_ID)
     if not channel: return
 
-    data = scrape_full_data()
+    # 1. Scrape the new data
+    data = scrape_weao_data()
     if not data: return
 
+    # 2. Build the Embed
     embed = discord.Embed(
         title="🟣 Carbon Studios | All Executor Statuses",
-        description="Live data including official Discord invites for each executor.",
+        description="Live data pulled from weao.xyz. Join the executor servers for specific support.",
         color=0x8A2BE2
     )
     embed.set_thumbnail(url=LOGO_URL)
 
-    for exec in data:
-        # Format: Name - Status - [Join Link]
+    for ex in data:
         embed.add_field(
-            name=f"🔹 {exec['name']}", 
-            value=f"{exec['status']}\n{exec['link']}", 
+            name=f"🔹 {ex['name']}",
+            value=f"**Status:** {ex['status']}\n**Link:** {ex['link']}",
             inline=True
         )
     
     embed.add_field(name="🔗 Main Hub", value=f"[Carbon Studios Discord]({DISCORD_LINK})", inline=False)
     
     current_time = datetime.now().strftime("%I:%M %p")
-    embed.set_footer(text=f"Sync Time: {current_time} • Source: weao.xyz")
+    embed.set_footer(text=f"Last Live Sync: {current_time} • Updates every 10m")
 
-    # Message Editing Logic (prevents spam)
-    async for message in channel.history(limit=5):
+    # 3. DELETE OLD MESSAGES (To prevent flooding)
+    # This removes all previous bot messages in the channel before sending the fresh one
+    async for message in channel.history(limit=20):
         if message.author == bot.user:
-            await message.edit(embed=embed)
-            return
+            try:
+                await message.delete()
+            except:
+                pass
+
+    # 4. Send the updated board
     await channel.send(embed=embed)
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
-    update_status_board.start()
+    print(f"Status Bot logged in as {bot.user}")
+    refresh_status_board.start()
 
 keep_alive()
-if TOKEN: bot.run(TOKEN)
+if TOKEN:
+    bot.run(TOKEN)
