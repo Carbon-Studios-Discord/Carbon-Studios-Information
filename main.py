@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-import requests
+import cloudscraper # specialized library to bypass bot protection
 from bs4 import BeautifulSoup
 import os
 from flask import Flask
@@ -8,10 +8,10 @@ from threading import Thread
 from datetime import datetime
 import asyncio
 
-# --- RENDER WEB SERVER (Keep-Alive) ---
+# --- RENDER KEEP-ALIVE ---
 app = Flask('')
 @app.route('/')
-def home(): return "Carbon Studios Live Board: ACTIVE"
+def home(): return "Carbon Studios Status Bot is RUNNING"
 def run(): app.run(host='0.0.0.0', port=8080)
 def keep_alive(): Thread(target=run).start()
 
@@ -24,90 +24,122 @@ LOGO_URL = "https://cdn.discordapp.com/icons/1193808450367537213/a_7914e9f733198
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def scrape_weao_data():
-    """Scrapes ALL executors, statuses, and links from weao.xyz"""
+def scrape_executors():
+    """Scrapes weao.xyz using CloudScraper to bypass protection"""
+    print("--- Starting Scrape ---")
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get("https://weao.xyz/", headers=headers, timeout=15)
+        scraper = cloudscraper.create_scraper() # Creates a browser-like session
+        response = scraper.get("https://weao.xyz/")
+        
+        if response.status_code != 200:
+            print(f"Error: Website returned status {response.status_code}")
+            return None
+
         soup = BeautifulSoup(response.text, 'html.parser')
-        
         executor_list = []
-        # Target table rows on weao.xyz
-        rows = soup.find_all('tr')
         
-        for row in rows:
-            cells = row.find_all('td')
-            if len(cells) >= 2:
-                # Get Name and Status text
-                name = cells[0].get_text(strip=True)
-                status_text = cells[1].get_text(strip=True)
-                
-                # Assign Emojis
-                if "Working" in status_text or "✅" in status_text:
-                    status = "✅ Working"
-                elif "Patched" in status_text or "❌" in status_text:
-                    status = "❌ Patched"
-                elif "Detectable" in status_text or "🔶" in status_text:
-                    status = "🔶 Detectable"
-                else:
-                    status = f"❓ {status_text}"
-                
-                # Find the specific Discord link for this row
-                link_tag = row.find('a', href=True)
-                d_link = f"[Join Discord]({link_tag['href']})" if link_tag and "discord" in link_tag['href'] else "No Link"
-                
-                executor_list.append({"name": name, "status": status, "link": d_link})
+        # Strategy: Find all common containers (cards, table rows)
+        # We look for anything that contains 'status' or known classes
+        cards = soup.find_all(['div', 'tr'], class_=['card', 'executor', 'item', 'row'])
         
+        # Fallback: If no specific classes found, look for ANY table row
+        if not cards:
+            cards = soup.find_all('tr')
+
+        print(f"Found {len(cards)} potential items")
+
+        for card in cards:
+            text = card.get_text(separator=" ").strip()
+            # Skip empty or irrelevant rows
+            if len(text) < 5 or "Status" in text[:10]: continue 
+
+            # 1. Get Name (First bold text or first word)
+            name_tag = card.find(['h3', 'strong', 'b', 'h4'])
+            name = name_tag.get_text(strip=True) if name_tag else text.split()[0]
+            
+            # 2. Get Status
+            if "Working" in text or "✅" in text:
+                status = "✅ Working"
+            elif "Patched" in text or "❌" in text:
+                status = "❌ Patched"
+            elif "Detectable" in text or "🔶" in text:
+                status = "🔶 Detectable"
+            elif "Updating" in text:
+                status = "🔄 Updating"
+            else:
+                # If we can't determine status, skip it (likely not an executor row)
+                continue
+
+            # 3. Get Discord Link
+            discord_link = "[No Discord Found]"
+            all_links = card.find_all('a', href=True)
+            for link in all_links:
+                href = link['href']
+                if "discord.gg" in href or "discord.com" in href:
+                    discord_link = f"[Join Server]({href})"
+                    break
+            
+            # Add to list
+            executor_list.append({"name": name, "status": status, "link": discord_link})
+
+        print(f"Successfully extracted {len(executor_list)} executors")
         return executor_list
+
     except Exception as e:
-        print(f"Scrape Error: {e}")
+        print(f"CRITICAL SCRAPE ERROR: {e}")
         return None
 
-@tasks.loop(minutes=10)
-async def refresh_status_board():
+@tasks.loop(minutes=5)
+async def update_status_task():
+    print("Running Update Task...")
     channel = bot.get_channel(CHANNEL_ID)
-    if not channel: return
+    if not channel:
+        print("Error: Could not find channel. Check CHANNEL_ID.")
+        return
 
-    # 1. Scrape the new data
-    data = scrape_weao_data()
-    if not data: return
+    # 1. Get Data
+    data = scrape_executors()
+    if not data:
+        print("No data found. Skipping update.")
+        return
 
-    # 2. Build the Embed
+    # 2. Build Embed
     embed = discord.Embed(
-        title="🟣 Carbon Studios | All Executor Statuses",
-        description="Live data pulled from weao.xyz. Join the executor servers for specific support.",
+        title="🟣 Carbon Studios | Live Executor Status",
+        description="Real-time status for all executors. Click 'Join Server' for support.",
         color=0x8A2BE2
     )
     embed.set_thumbnail(url=LOGO_URL)
 
     for ex in data:
         embed.add_field(
-            name=f"🔹 {ex['name']}",
-            value=f"**Status:** {ex['status']}\n**Link:** {ex['link']}",
+            name=f"🔹 {ex['name']}", 
+            value=f"**Status:** {ex['status']}\n**Link:** {ex['link']}", 
             inline=True
         )
-    
-    embed.add_field(name="🔗 Main Hub", value=f"[Carbon Studios Discord]({DISCORD_LINK})", inline=False)
-    
-    current_time = datetime.now().strftime("%I:%M %p")
-    embed.set_footer(text=f"Last Live Sync: {current_time} • Updates every 10m")
 
-    # 3. DELETE OLD MESSAGES (To prevent flooding)
-    # This removes all previous bot messages in the channel before sending the fresh one
-    async for message in channel.history(limit=20):
-        if message.author == bot.user:
-            try:
+    embed.add_field(name="🔗 Official Hub", value=f"[Carbon Studios Discord]({DISCORD_LINK})", inline=False)
+    embed.set_footer(text=f"Last Updated: {datetime.now().strftime('%H:%M:%S UTC')} • Source: weao.xyz")
+
+    # 3. DELETE OLD MESSAGES & SEND NEW
+    # We search the last 10 messages. If the bot sent them, delete them.
+    try:
+        async for message in channel.history(limit=10):
+            if message.author == bot.user:
                 await message.delete()
-            except:
-                pass
-
-    # 4. Send the updated board
-    await channel.send(embed=embed)
+                await asyncio.sleep(1) # Sleep to avoid rate limits
+        
+        # Send the fresh message
+        await channel.send(embed=embed)
+        print("Message updated successfully.")
+        
+    except Exception as e:
+        print(f"Message Error: {e}")
 
 @bot.event
 async def on_ready():
-    print(f"Status Bot logged in as {bot.user}")
-    refresh_status_board.start()
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    update_status_task.start()
 
 keep_alive()
 if TOKEN:
