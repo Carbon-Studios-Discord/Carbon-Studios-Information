@@ -1,13 +1,13 @@
+import os
 import discord
 from discord.ext import commands, tasks
-import cloudscraper
 from bs4 import BeautifulSoup
-import os
 from flask import Flask
 from threading import Thread
 from datetime import datetime
+from seleniumbase import Driver
 
-# --- FLASK SERVER (For Render) ---
+# --- RENDER PORT FIX ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is Online"
@@ -29,54 +29,41 @@ DISCORD_LINK = "https://discord.gg/carbon-studios-1193808450367537213"
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Global variable to store the message ID so we can edit it
-status_msg_id = None
-
 def get_executor_data():
-    """Bypasses protection and scrapes executor data."""
+    """Uses SeleniumBase UC Mode to bypass Cloudflare."""
+    # Initialize driver in undetected mode
+    driver = Driver(uc=True, headless=True) 
     try:
-        # Using a more aggressive browser imitation
-        scraper = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-        )
-        # Adding a real User-Agent header is often the missing piece
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
-        }
-        response = scraper.get("https://weao.xyz/", headers=headers, timeout=20)
+        driver.get("https://weao.xyz/")
+        # Wait a few seconds for Cloudflare to clear
+        driver.sleep(5) 
         
-        if response.status_code != 200:
-            return None
-
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
         results = []
-        
-        # Finding all table rows
         rows = soup.find_all('tr')
+        
         for row in rows:
             cols = row.find_all('td')
             if len(cols) >= 2:
                 name = cols[0].get_text(strip=True)
-                # Skip header rows
-                if name.lower() in ["executor", "status", "name", ""] or len(name) > 30:
-                    continue
-
+                if name.lower() in ["executor", "status", "name", ""]: continue
+                
                 raw_status = cols[1].get_text(strip=True)
                 status = "✅ Working" if "Working" in raw_status else "❌ Patched" if "Patched" in raw_status else f"🔄 {raw_status}"
-
+                
                 link_tag = row.find('a', href=True)
                 link = f"[Join Discord]({link_tag['href']})" if link_tag and "discord" in link_tag['href'] else "No Link"
-
                 results.append({"name": name, "status": status, "link": link})
         
         return results
     except Exception as e:
         print(f"Scraper Error: {e}")
         return None
+    finally:
+        driver.quit()
 
-@tasks.loop(minutes=5)
+@tasks.loop(minutes=10)
 async def update_display():
-    global status_msg_id
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
     if not channel: return
@@ -85,12 +72,11 @@ async def update_display():
 
     embed = discord.Embed(
         title="🟣 Carbon Studios | Executor Status",
-        description="Real-time status updates from weao.xyz",
+        description="Real-time status updates via Headless Browser",
         color=0x8A2BE2 if data else 0xFF0000
     )
 
     if data:
-        # Displaying all found executors
         for item in data[:24]:
             embed.add_field(
                 name=f"🔹 {item['name']}",
@@ -98,32 +84,22 @@ async def update_display():
                 inline=True
             )
     else:
-        embed.add_field(name="⚠️ Connection Error", value="Could not reach weao.xyz. Retrying...", inline=False)
+        embed.add_field(name="⚠️ Connection Error", value="Cloudflare blocked the request. Retrying...", inline=False)
 
-    embed.add_field(name="🔗 Main Hub", value=f"[Join Carbon Studios]({DISCORD_LINK})", inline=False)
-    embed.set_footer(text=f"Last Sync: {datetime.now().strftime('%H:%M')} UTC • Updates every 5m")
+    embed.set_footer(text=f"Last Sync: {datetime.now().strftime('%H:%M')} UTC")
 
-    # Clean up and Send/Edit logic
-    try:
-        # Step 1: Find any existing message by the bot in the channel and delete it
-        # This prevents flooding if the bot restarts
-        async for message in channel.history(limit=5):
-            if message.author == bot.user:
-                await message.delete()
-        
-        # Step 2: Send a fresh message
-        await channel.send(embed=embed)
-        
-    except Exception as e:
-        print(f"Display Error: {e}")
+    # Clear old messages and resend
+    async for message in channel.history(limit=5):
+        if message.author == bot.user:
+            await message.delete()
+    await channel.send(embed=embed)
 
 @bot.event
 async def on_ready():
-    print(f"Bot connected as {bot.user}")
+    print(f"Bot logged in as {bot.user}")
     if not update_display.is_running():
         update_display.start()
 
 if __name__ == "__main__":
     keep_alive()
-    if TOKEN:
-        bot.run(TOKEN)
+    if TOKEN: bot.run(TOKEN)
