@@ -1,29 +1,20 @@
-#!/usr/bin/env bash
-set -o errexit
+from seleniumbase import Driver
 
-# --- 1. DOWNLOAD CHROME ---
-STORAGE_DIR=/opt/render/project/.render
-if [[ ! -d $STORAGE_DIR/chrome ]]; then
-  echo "...Downloading Chrome"
-  mkdir -p $STORAGE_DIR/chrome
-  cd $STORAGE_DIR/chrome
-  wget -P ./ https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-  dpkg -x ./google-chrome-stable_current_amd64.deb $STORAGE_DIR/chrome
-  rm ./google-chrome-stable_current_amd64.deb
-else
-  echo "...Using Chrome from cache"
-fi
-
-# --- 2. GO BACK TO PROJECT ROOT ---
-# This is the important part! We need to go back to where requirements.txt is.
-cd $HOME/project/src || cd /opt/render/project/src
-
-# --- 3. INSTALL REQUIREMENTS ---
-# Use 'pip install' on the file in the current directory
-if [ -f "requirements.txt" ]; then
-    pip install -r requirements.txt
-else
-    echo "ERROR: requirements.txt not found in $(pwd)"
-    ls -R # This will print all files to your log so you can see where it is
-    exit 1
-fi
+def get_executor_data():
+    # UC mode bypasses anti-bot detection by renaming variables like 'cdc_'
+    # xvfb=True is the best way to run 'headless' on Linux without being detected
+    driver = Driver(uc=True, xvfb=True) 
+    try:
+        url = "https://weao.xyz/"
+        # Reconnect logic helps bypass initial JavaScript challenges
+        driver.uc_open_with_reconnect(url, 6) 
+        driver.sleep(5) 
+        
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        # ... (rest of your table row scraping logic)
+        return results
+    except Exception as e:
+        print(f"Scraper Error: {e}")
+        return None
+    finally:
+        driver.quit()
