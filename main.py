@@ -1,13 +1,13 @@
-import os
 import discord
 from discord.ext import commands, tasks
+from seleniumbase import Driver
 from bs4 import BeautifulSoup
+import os
 from flask import Flask
 from threading import Thread
 from datetime import datetime
-from seleniumbase import Driver
 
-# --- RENDER PORT FIX ---
+# --- 1. RENDER PORT FIX (Flask) ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is Online"
@@ -21,7 +21,7 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# --- CONFIG ---
+# --- 2. CONFIG ---
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = 1446846255572451399 
 DISCORD_LINK = "https://discord.gg/carbon-studios-1193808450367537213"
@@ -29,13 +29,14 @@ DISCORD_LINK = "https://discord.gg/carbon-studios-1193808450367537213"
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# --- 3. YOUR SCRAPER LOGIC ---
 def get_executor_data():
     """Uses SeleniumBase UC Mode to bypass Cloudflare."""
-    # Initialize driver in undetected mode
-    driver = Driver(uc=True, headless=True) 
+    # uc=True is for 'Undetected', xvfb=True is for Linux servers like Render
+    driver = Driver(uc=True, xvfb=True) 
     try:
-        driver.get("https://weao.xyz/")
-        # Wait a few seconds for Cloudflare to clear
+        url = "https://weao.xyz/"
+        driver.uc_open_with_reconnect(url, 6) 
         driver.sleep(5) 
         
         soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -62,6 +63,7 @@ def get_executor_data():
     finally:
         driver.quit()
 
+# --- 4. DISCORD AUTOMATION ---
 @tasks.loop(minutes=10)
 async def update_display():
     await bot.wait_until_ready()
@@ -72,7 +74,7 @@ async def update_display():
 
     embed = discord.Embed(
         title="🟣 Carbon Studios | Executor Status",
-        description="Real-time status updates via Headless Browser",
+        description="Real-time status updates from weao.xyz",
         color=0x8A2BE2 if data else 0xFF0000
     )
 
@@ -84,14 +86,16 @@ async def update_display():
                 inline=True
             )
     else:
-        embed.add_field(name="⚠️ Connection Error", value="Cloudflare blocked the request. Retrying...", inline=False)
+        embed.add_field(name="⚠️ Connection Error", value="Cloudflare blocked the request. Retrying in 10m...", inline=False)
 
+    embed.add_field(name="🔗 Our Server", value=f"[Join Carbon Studios]({DISCORD_LINK})", inline=False)
     embed.set_footer(text=f"Last Sync: {datetime.now().strftime('%H:%M')} UTC")
 
-    # Clear old messages and resend
+    # Delete old bot messages to keep it clean
     async for message in channel.history(limit=5):
         if message.author == bot.user:
             await message.delete()
+    
     await channel.send(embed=embed)
 
 @bot.event
@@ -100,6 +104,10 @@ async def on_ready():
     if not update_display.is_running():
         update_display.start()
 
+# --- 5. START EVERYTHING ---
 if __name__ == "__main__":
     keep_alive()
-    if TOKEN: bot.run(TOKEN)
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("ERROR: BOT_TOKEN environment variable not found!")
