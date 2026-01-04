@@ -6,6 +6,8 @@ import os
 from flask import Flask
 from threading import Thread
 from datetime import datetime
+import traceback
+import asyncio
 
 # --- 1. RENDER PORT FIX (Flask) ---
 app = Flask('')
@@ -27,15 +29,17 @@ CHANNEL_ID = 1446846255572451399
 DISCORD_LINK = "https://discord.gg/carbon-studios-1193808450367537213"
 
 intents = discord.Intents.default()
+intents.message_content = True # Needed for channel history management
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- 3. YOUR SCRAPER LOGIC ---
+# --- 3. THE STEALTH SCRAPER ---
 def get_executor_data():
-    """Uses SeleniumBase UC Mode to bypass Cloudflare."""
-    # uc=True is for 'Undetected', xvfb=True is for Linux servers like Render
+    """Bypasses Cloudflare using UC Mode and a Virtual Display."""
+    # uc=True renames 'cdc_' variables; xvfb=True mimics a real monitor on Linux
     driver = Driver(uc=True, xvfb=True) 
     try:
         url = "https://weao.xyz/"
+        # Reconnect logic helps bypass the 'Wait 5 seconds' Cloudflare page
         driver.uc_open_with_reconnect(url, 6) 
         driver.sleep(5) 
         
@@ -61,6 +65,7 @@ def get_executor_data():
         print(f"Scraper Error: {e}")
         return None
     finally:
+        # Crucial to prevent 'Chrome not found' or 'High RAM' errors
         driver.quit()
 
 # --- 4. DISCORD AUTOMATION ---
@@ -70,7 +75,12 @@ async def update_display():
     channel = bot.get_channel(CHANNEL_ID)
     if not channel: return
 
-    data = get_executor_data()
+    # Run the heavy scraper in a thread so the bot doesn't freeze
+    try:
+        data = await bot.loop.run_in_executor(None, get_executor_data)
+    except Exception as e:
+        print(f"Task Execution Error: {e}")
+        return
 
     embed = discord.Embed(
         title="🟣 Carbon Studios | Executor Status",
@@ -79,6 +89,7 @@ async def update_display():
     )
 
     if data:
+        # Embeds have a 25-field limit
         for item in data[:24]:
             embed.add_field(
                 name=f"🔹 {item['name']}",
@@ -86,28 +97,34 @@ async def update_display():
                 inline=True
             )
     else:
-        embed.add_field(name="⚠️ Connection Error", value="Cloudflare blocked the request. Retrying in 10m...", inline=False)
+        embed.add_field(name="⚠️ Connection Error", value="Cloudflare blocked the request. Retrying...", inline=False)
 
-    embed.add_field(name="🔗 Our Server", value=f"[Join Carbon Studios]({DISCORD_LINK})", inline=False)
     embed.set_footer(text=f"Last Sync: {datetime.now().strftime('%H:%M')} UTC")
 
-    # Delete old bot messages to keep it clean
-    async for message in channel.history(limit=5):
-        if message.author == bot.user:
-            await message.delete()
-    
-    await channel.send(embed=embed)
+    # Clean up old messages and send new one
+    try:
+        async for message in channel.history(limit=5):
+            if message.author == bot.user:
+                await message.delete()
+        await channel.send(embed=embed)
+    except Exception as e:
+        print(f"Discord Sync Error: {e}")
+
+@update_display.error
+async def update_display_error(error):
+    print(f"CRITICAL LOOP ERROR: {error}")
+    traceback.print_exc()
 
 @bot.event
 async def on_ready():
-    print(f"Bot logged in as {bot.user}")
+    print(f"Bot connected as {bot.user}")
     if not update_display.is_running():
         update_display.start()
 
-# --- 5. START EVERYTHING ---
+# --- 5. START ---
 if __name__ == "__main__":
     keep_alive()
     if TOKEN:
         bot.run(TOKEN)
     else:
-        print("ERROR: BOT_TOKEN environment variable not found!")
+        print("BOT_TOKEN is missing from Environment Variables!")
