@@ -7,8 +7,7 @@ from flask import Flask
 from threading import Thread
 from datetime import datetime
 import traceback
-import asyncio
-from pyvirtualdisplay import Display  # This is the secret weapon
+from pyvirtualdisplay import Display 
 
 # --- 1. RENDER SERVER CONFIG ---
 app = Flask('')
@@ -27,31 +26,29 @@ def keep_alive():
 # --- 2. BOT CONFIG ---
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = 1446846255572451399 
-DISCORD_LINK = "https://discord.gg/carbon-studios-1193808450367537213"
-
+# ENABLE INTENTS OR THE BOT CANNOT DELETE MESSAGES
 intents = discord.Intents.default()
 intents.message_content = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- 3. THE "NUCLEAR" SCRAPER ---
+# --- 3. THE FIXED SCRAPER ---
 def get_executor_data():
     display = None
     driver = None
     try:
-        # A. MANUALLY START A FAKE MONITOR
-        # This tricks the browser into thinking it has a screen (1920x1080)
+        # A. START FAKE SCREEN
+        # This replaces the "xvfb=True" that was crashing your bot
         display = Display(visible=0, size=(1920, 1080))
         display.start()
         
-        # B. START BROWSER IN "HEADED" MODE (NOT HEADLESS)
-        # We say headless=False because we have the fake monitor above.
-        # This is 100% undetectable by Cloudflare because it IS a real browser.
+        # B. START BROWSER
+        # We use headless=False so Cloudflare thinks we are a real user.
+        # The fake screen captures the window so it works on the server.
         driver = Driver(uc=True, headless=False)
         
         url = "https://weao.xyz/"
-        # Connect and wait for the Cloudflare "checking your browser" screen to pass
-        driver.uc_open_with_reconnect(url, 10) 
-        driver.sleep(8) # Generous wait time for the page to load
+        driver.uc_open_with_reconnect(url, 15) # Increased wait time
+        driver.sleep(10) 
         
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         results = []
@@ -73,13 +70,12 @@ def get_executor_data():
         return results
 
     except Exception as e:
-        print(f"Scraper Crashed: {e}")
+        print(f"Scraper Error: {e}")
         traceback.print_exc()
         return None
         
     finally:
-        # C. CLEANUP IS MANDATORY
-        # We must close the driver AND the fake screen or the server memory fills up
+        # CLEANUP - Prevents memory leaks
         if driver:
             try: driver.quit()
             except: pass
@@ -94,7 +90,7 @@ async def update_display():
     channel = bot.get_channel(CHANNEL_ID)
     if not channel: return
 
-    # Run scraper in a separate thread to prevent bot lag
+    # Run scraper in background to stop bot freezing
     data = await bot.loop.run_in_executor(None, get_executor_data)
 
     embed = discord.Embed(
@@ -110,10 +106,9 @@ async def update_display():
                 value=f"**Status:** {item['status']}\n{item['link']}",
                 inline=True
             )
+        embed.set_footer(text=f"Last Sync: {datetime.now().strftime('%H:%M')} UTC")
     else:
-        embed.add_field(name="⚠️ Connection Error", value="Could not bypass Cloudflare. Retrying...", inline=False)
-
-    embed.set_footer(text=f"Last Sync: {datetime.now().strftime('%H:%M')} UTC")
+        embed.add_field(name="⚠️ Connection Error", value="Could not scrape weao.xyz. Check logs.", inline=False)
 
     try:
         async for message in channel.history(limit=5):
